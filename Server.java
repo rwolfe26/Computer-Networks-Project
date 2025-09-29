@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Server {
     private static final int DEFAULT_PORT = 59090;
-    private static void main(String[] args) throws Exception{
+    public static void main(String[] args) throws Exception{
         boolean simple = false;
         int port = DEFAULT_PORT;
         for (int i = 0; i < args.length; i++){
@@ -49,7 +49,7 @@ private static void runSimple(int port) throws Exception{
             reply = "I am good, how about you?";
         } else if (lower.contains("time")) {
             reply = "Server time is " + new Date();
-        } else if (lower.contains("Chicken")) {
+        } else if (lower.contains("chicken")) {
             reply = "Nuggets";
         } else {
             // These are the reponses from the ArrayList

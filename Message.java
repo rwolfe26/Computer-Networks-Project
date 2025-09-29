@@ -1,6 +1,4 @@
 import java.io.Serializable;
-
-import java.io.Serializable;
 import java.util.Date;
 
 public class Message implements Serializable {
@@ -18,6 +16,7 @@ public class Message implements Serializable {
     public Message(String text, String from, String to) {
         this.text = text;
         this.from = from;
+        this.to = to;
         this.created = new Date();
     }
 
