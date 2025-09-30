@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Client.java
  *
- * Works with your two server modes:
+ * Works with two server modes:
  *   1) --simple  : string-only round trip using Data{Input,Output}Stream (Section 2.7 demo)
  *   2) (default) : multi-client chat using Object streams and Message objects
  *
