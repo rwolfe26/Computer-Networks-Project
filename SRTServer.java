@@ -98,60 +98,100 @@ public class SRTServer {
         listener = new Thread(() -> {
             try {
                 while (running) {
-                    // read the frame length that the Client wrote first
                     int frameLen;
                     try {
                         frameLen = in.readInt();          // length prefix
                     } catch (EOFException eof) {
+                        System.out.println("[SRTServer] Client disconnected (EOF).");
                         break;
                     }
                     if (frameLen <= 0) continue;
     
-                    // 2) read 'frameLen' bytes and then it parses the segment
                     byte[] buf = new byte[frameLen];
-                    in.readFully(buf);                    // full frame
+                    in.readFully(buf);
                     SRTSegment seg = SRTSegment.fromBytes(buf);
     
-                    // route by the server’s SRT port
+                    System.out.printf(
+                        "[SRTServer] Received %s (src=%d → dest=%d, len=%d)%n",
+                        seg.type, seg.srcPort, seg.destPort, seg.length
+                    );
+    
+                    // Route by server’s SRT port
                     TCB t = findbyServerPort(seg.destPort);
                     if (t == null) {
-                        // No listening socket on that port
+                        System.out.printf("[SRTServer] No TCB listening on port %d%n", seg.destPort);
                         continue;
                     }
     
-                    if (seg.type == SRTSegment.Type.SYN && t.state == S_LISTENING) {
-                        t.portClient = seg.srcPort;
-                        t.state = S_CONNECTED;
+                    switch (seg.type) {
+                        case SYN:
+                            System.out.printf("[SRTServer] SYN received on %d; current state=%d%n",
+                                              t.portServer, t.state);
+                            if (t.state == S_LISTENING) {
+                                t.portClient = seg.srcPort;
+                                t.state = S_CONNECTED;
     
-                        // reply SYNACK with the same framing (length + bytes)
-                        SRTSegment synack = new SRTSegment.Builder()
-                            .type(SRTSegment.Type.SYNACK)
-                            .srcPort(t.portServer)
-                            .destPort(t.portClient)
-                            .build();
-                        send(synack);
+                                SRTSegment synack = new SRTSegment.Builder()
+                                    .type(SRTSegment.Type.SYNACK)
+                                    .srcPort(t.portServer)
+                                    .destPort(t.portClient)
+                                    .build();
+                                send(synack);
+                                System.out.printf("[SRTServer] Sent SYNACK to client %d%n", t.portClient);
+                            }
+                            break;
     
-                    } else if (seg.type == SRTSegment.Type.FIN && t.state == S_CONNECTED) {
+                        case FIN:
+                            System.out.printf("[SRTServer] FIN received on %d; current state=%d%n",
+                                              t.portServer, t.state);
+                            if (t.state == S_CONNECTED) {
+                                SRTSegment finack = new SRTSegment.Builder()
+                                    .type(SRTSegment.Type.FINACK)
+                                    .srcPort(t.portServer)
+                                    .destPort(t.portClient)
+                                    .build();
+                                send(finack);
+                                System.out.printf("[SRTServer] Sent FINACK to client %d%n", t.portClient);
     
-                        SRTSegment finack = new SRTSegment.Builder()
-                            .type(SRTSegment.Type.FINACK)
-                            .srcPort(t.portServer)
-                            .destPort(t.portClient)
-                            .build();
-                        send(finack);
+                                t.state = S_CLOSEWAIT;
+                                new Timer(true).schedule(new TimerTask() {
+                                    @Override
+                                    public void run() {
+                                        t.state = S_CLOSED;
+                                        System.out.printf("[SRTServer] Connection on port %d fully CLOSED.%n",
+                                                          t.portServer);
+                                    }
+                                }, CLOSE_WAIT_TIMEOUT_MS);
+                            }
+                            break;
     
-                        t.state = S_CLOSEWAIT;
-                        new Timer(true).schedule(new TimerTask() {
-                            @Override public void run() { t.state = S_CLOSED; }
-                        }, CLOSE_WAIT_TIMEOUT_MS);
+                        case DATA:
+                            System.out.printf("[SRTServer] DATA received (%d bytes) from %d%n",
+                                              seg.length, seg.srcPort);
+                            // Optional show DATAACK:
+                            SRTSegment dataAck = new SRTSegment.Builder()
+                                .type(SRTSegment.Type.DATAACK)
+                                .srcPort(t.portServer)
+                                .destPort(t.portClient)
+                                .build();
+                            send(dataAck);
+                            System.out.printf("[SRTServer] Sent DATAACK to client %d%n", t.portClient);
+                            break;
+    
+                        default:
+                            System.out.printf("[SRTServer] Ignored segment type %s%n", seg.type);
+                            break;
                     }
-                    
                 }
-            } catch (IOException ignored) {}
+            } catch (IOException e) {
+                if (running) System.err.println("[SRTServer] Listener I/O error: " + e.getMessage());
+            }
         }, "SRTServerListener");
+    
         listener.setDaemon(true);
         listener.start();
     }
+    
     
 
     private void send(SRTSegment seg) {
@@ -164,16 +204,6 @@ public class SRTServer {
     }
     
 
-    // private static byte[] readN(DataInputStream in, int n) throws IOException {
-    //     byte[] buf = new byte[n];
-    //     int off = 0;
-    //     while (off < n) {
-    //         int r = in.read(buf, off, n - off);
-    //         if (r < 0) return null;
-    //         off += r;
-    //     }
-    //     return buf;
-    // }
 
 
 
