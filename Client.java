@@ -29,6 +29,7 @@ public class Client {
         String host = "localhost";
         int port = 59090;
         boolean simple = false;
+        boolean srt = false;
         String name = null;
         String simpleMsg = null;
 
@@ -44,6 +45,9 @@ public class Client {
                 case "--simple":
                     simple = true;
                     break;
+                case "--srt":
+                    srt = true;
+                    break;
                 case "--name":
                     if (i + 1 < args.length) name = args[++i];
                     break;
@@ -54,12 +58,57 @@ public class Client {
                     // ignore unknowns for now
             }
         }
-
+        if (srt){
+            runSrtDemo(host, port);
+            return;
+        }
         if (simple) {
             runSimple(host, port, simpleMsg);
         } else {
             runChat(host, port, name);
         }
+    }
+
+
+    private static void runSrtDemo(String host, int port) {
+        System.out.println("[client] SRT demo ovrlaay " + host + ":" + port);
+
+        SRTClient srtc = new SRTClient();
+        if (srtc.startOverlay(host, port) < 0) {
+            System.err.println("[client] overlay failed");
+            return;
+        }
+        if (srtc.initSRTClient() < 0) {
+            System.err.println("[client] init failed");
+            srtc.stopOverlay();
+        }
+
+        //first connection from 87 client to 88 server
+        int sock1 = srtc.createSockSRTClient(87);
+        if (sock1 < 0) {
+            System.err.println("createSock failed");
+            srtc.stopOverlay();
+            return;
+        }
+
+        System.out.println("[client] connect 87 -> 88");
+        if (srtc.connectSRTClient(sock1, 88) < 0){
+            System.err.println("connect failed");
+            srtc.stopOverlay();
+            return;
+        }
+        System.out.println("[client] connected (87->88)");
+
+        try { Thread.sleep(10_000); } catch (InterruptedException ignored) {}
+
+        System.out.println("[client] disconnect 87->88");
+        if (srtc.disconnectSRTClient(sock1) < 0) System.err.println("disconnect returned -1");
+        if (srtc.closeSRTClient(sock1) < 0) System.err.println("close returned -1");
+
+        srtc.stopOverlay();
+        System.out.println("[client] SRT demo done.");
+
+
     }
 
     /* -------------------------------------------------------------

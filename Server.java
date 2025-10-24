@@ -12,19 +12,46 @@ public class Server {
     private static final int DEFAULT_PORT = 59090;
     public static void main(String[] args) throws Exception{
         boolean simple = false;
+        boolean srt = false;
         int port = DEFAULT_PORT;
         for (int i = 0; i < args.length; i++){
             if ("--simple".equals(args[i])) simple = true;
+            else if("--srt".equals(args[i])) srt = true;
             else if ("--port".equals(args[i]) && i+1 < args.length){
                 port = Integer.parseInt(args[++i]);
             }
         }
-        if (simple){
+        if (srt){
+            runSrtDemo(port);
+        } else if (simple){
             runSimple(port);
         } else {
             runChat(port);
         }
     }
+
+
+private static void runSrtDemo(int overlayPort) throws Exception {
+    System.out.println("[SRT] is starting server demo on overlay port " + overlayPort);
+
+    SRTServer srt = new SRTServer();
+    if (srt.startOverlay(overlayPort) < 0) throw new RuntimeException("overlay failed");
+    if (srt.init() < 0) throw new RuntimeException("init failed");
+
+    //server port 88
+    int s1 = srt.createSock(88);
+    if (s1 < 0) throw new RuntimeException("createSock(88) failed");
+    System.out.println("[SRT] is listening on SRT port 88...");
+    if (srt.accept(s1) < 0) System.out.println("[SRT] accept(88) timed out/failed");
+    else System.out.println("[SRT] CONNected on 88");
+
+
+    Thread.sleep(12_000);
+
+    if (srt.close(s1) < 0) System.out.println("[SRT] close(88) not yet closed ");
+    srt.stopOverlay();
+    System.out.println("[SRT] demo complete");
+}
 
 
 // This is the mode that uses the string over TCP. Here is where a single client sends one UTF string, the server replies and then closes.

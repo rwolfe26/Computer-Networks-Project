@@ -20,6 +20,8 @@ public class SRTClient {
     private DataInputStream inputStream;
     private DataOutputStream outputStream;
 
+    private ListenThread listenThread;
+
     private static final int SYN_TIMEOUT = 100;
     private static final int SYN_MAX_RETRY = 5;
 
@@ -33,6 +35,10 @@ public class SRTClient {
 
 
     public int initSRTClient() {
+        if (inputStream == null) {
+            System.err.println("initSRTClient: overlay not started; call startOverlay first");
+            return -1;
+        }
         try {
             // make sure tcbTable is initialized and all entries are null
             tcbTable = new TCBClient[MAX_TCB_ENTRIES];
@@ -40,7 +46,7 @@ public class SRTClient {
                 tcbTable[i] = null;
             }
 
-            ListenThread listenThread = new ListenThread(inputStream, tcbTable);
+            listenThread = new ListenThread(inputStream, tcbTable);
             listenThread.start();
 
             System.out.println("SRTClient initialized with " + MAX_TCB_ENTRIES + " entries");
@@ -220,6 +226,15 @@ public class SRTClient {
 
     public int stopOverlay() {
         try {
+            if (listenThread != null) {
+                listenThread.stopRunning();
+                try {
+                    listenThread.join(200);
+                } catch (InterruptedException e) {
+                    // TODO Auto-generated catch block
+                    e.printStackTrace();
+                }
+            }
             if (inputStream != null) inputStream.close();
             if (outputStream != null) outputStream.close();
             if (overlaySocket != null) overlaySocket.close();
@@ -277,10 +292,14 @@ class ListenThread extends Thread {
                 }
 
             } catch (IOException e) {
+                if (running){
                 System.err.println("Error reading from SRTClient(IO error): " + e.getMessage());
+                }
                 running = false;
             } catch (Exception e) {
+                if (running){
                 System.err.println("Error reading from SRTClient(parsing error): " + e.getMessage());
+                }
                 running = false;
             }
         }
@@ -315,7 +334,7 @@ class TCBClient {
     int portNumServer;
     int nodeIDClient;
     int portNumClient;
-    SRTCState clientState;
+    volatile SRTCState clientState;
     Timer timer;
 
 }
