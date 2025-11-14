@@ -3,24 +3,24 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
+import java.util.LinkedList;
 import java.util.Timer;
 
-enum SRTCState{
+enum SRTCState {
     CLOSED,
     CONNECTED,
     SYNSENT,
     FINWAIT
 }
 
-
-
+// -------------------------------
+//        SRT CLIENT
+// -------------------------------
 public class SRTClient {
 
     private Socket overlaySocket;
     private DataInputStream inputStream;
     private DataOutputStream outputStream;
-
-    private ListenThread listenThread;
 
     private static final int SYN_TIMEOUT = 100;
     private static final int SYN_MAX_RETRY = 5;
@@ -28,28 +28,27 @@ public class SRTClient {
     private static final int FIN_TIMEOUT = 100;
     private static final int FIN_MAX_RETRY = 5;
 
-
+    // Assignment 3 constants
+    private static final int GBN_WINDOW = 10;
+    private static final int DATA_TIMEOUT = 200;
+    private static final int SEND_POLL = 50;
 
     private static final int MAX_TCB_ENTRIES = 10;
-    private TCBClient[] tcbTable; // array to host TCB clients for each Socket connection
+    private TCBClient[] tcbTable;
 
 
+    // -------------------------------
+    // INITIALIZATION
+    // -------------------------------
     public int initSRTClient() {
-        if (inputStream == null) {
-            System.err.println("initSRTClient: overlay not started; call startOverlay first");
-            return -1;
-        }
         try {
-            // make sure tcbTable is initialized and all entries are null
             tcbTable = new TCBClient[MAX_TCB_ENTRIES];
-            for (int i = 0; i < MAX_TCB_ENTRIES; i++) {
-                tcbTable[i] = null;
-            }
+            for (int i = 0; i < MAX_TCB_ENTRIES; i++) tcbTable[i] = null;
 
-            listenThread = new ListenThread(inputStream, tcbTable);
-            listenThread.start();
+            ListenThread listener = new ListenThread(inputStream, tcbTable);
+            listener.start();
 
-            System.out.println("SRTClient initialized with " + MAX_TCB_ENTRIES + " entries");
+            System.out.println("SRTClient initialized.");
             return 1;
         } catch (Exception e) {
             System.err.println("Could not initialize SRTClient: " + e.getMessage());
@@ -57,12 +56,13 @@ public class SRTClient {
         }
     }
 
+
+    // -------------------------------
+    // CONNECTION SETUP
+    // -------------------------------
     public int connectSRTClient(int sockfd, int serverPort) {
         TCBClient tcb = tcbTable[sockfd];
-        if (tcb == null || tcb.clientState != SRTCState.CLOSED) {
-            System.err.println("Error connecting SRTClient(no TCBClient found or not closed): " + sockfd);
-            return -1;
-        }
+        if (tcb == null || tcb.clientState != SRTCState.CLOSED) return -1;
 
         tcb.portNumServer = serverPort;
         tcb.clientState = SRTCState.SYNSENT;
@@ -72,248 +72,237 @@ public class SRTClient {
                 .destPort(tcb.portNumServer)
                 .seqNum(0)
                 .type(SRTSegment.Type.SYN)
-                .rcvWin(SRTSegment.MAX_SEG_LEN) // not sure if this breaks it?
+                .rcvWin(SRTSegment.MAX_SEG_LEN)
                 .checksum(0)
                 .build();
 
-        for (int attempt = 0; attempt < SYN_MAX_RETRY; attempt++) {
-            System.out.println("Sending SYN to server at port " + serverPort + " attempt " + attempt);
-            if (sendSegment(syn) == -1) {
-                System.err.println("Error sending SYN to server at port " + serverPort + " attempt " + attempt);
-                continue;
-            }
-
-            try{
-                Thread.sleep(SYN_TIMEOUT);
-            } catch (InterruptedException ignored) {
-            }
-            if (tcb.clientState == SRTCState.CONNECTED) {
-                System.out.println("SYNACK Received, Connection Established. To Server Port:" + serverPort);
-                return 1;
-            }
+        for (int i = 0; i < SYN_MAX_RETRY; i++) {
+            sendSegment(syn);
+            try { Thread.sleep(SYN_TIMEOUT); } catch (Exception ignored) {}
+            if (tcb.clientState == SRTCState.CONNECTED) return 1;
         }
 
-        System.err.println("Could not connect to server at port " + serverPort);
         tcb.clientState = SRTCState.CLOSED;
         return -1;
     }
 
+
+    // -------------------------------
+    // DATA SENDING (ASSIGNMENT 3)
+    // -------------------------------
+    public int sendSRTClient(int sockfd, byte[] data) {
+        TCBClient tcb = tcbTable[sockfd];
+        if (tcb == null || tcb.clientState != SRTCState.CONNECTED) return -1;
+
+        int offset = 0;
+        while (offset < data.length) {
+            int len = Math.min(SRTSegment.MAX_SEG_LEN, data.length - offset);
+            byte[] chunk = new byte[len];
+            System.arraycopy(data, offset, chunk, 0, len);
+
+            SRTSegment seg = new SRTSegment.Builder()
+                    .srcPort(tcb.portNumClient)
+                    .destPort(tcb.portNumServer)
+                    .seqNum(tcb.nextSeqNum)
+                    .type(SRTSegment.Type.DATA)
+                    .data(chunk)
+                    .rcvWin(SRTSegment.MAX_SEG_LEN)
+                    .checksum(0)
+                    .build();
+
+            synchronized (tcb.sendBuffer) {
+                tcb.sendBuffer.add(new SendBufferNode(seg));
+            }
+
+            tcb.nextSeqNum += len;
+            offset += len;
+        }
+
+        // First time adding data? Start worker
+        if (!tcb.workerRunning) {
+            tcb.workerRunning = true;
+            new Thread(new SendThread(tcb)).start();
+        }
+
+        return 1;
+    }
+
+
+    // -------------------------------
+    // CONNECTION TEARDOWN
+    // -------------------------------
     public int disconnectSRTClient(int sockfd) {
         TCBClient tcb = tcbTable[sockfd];
-        if (tcb == null || tcb.clientState != SRTCState.CONNECTED) {
-            System.err.println("[SRTClient] Invalid socket or state for disconnect.");
-            return -1;
-        }
+        if (tcb == null || tcb.clientState != SRTCState.CONNECTED) return -1;
 
         tcb.clientState = SRTCState.FINWAIT;
 
         SRTSegment fin = new SRTSegment.Builder()
                 .srcPort(tcb.portNumClient)
                 .destPort(tcb.portNumServer)
-                .seqNum(0)
                 .type(SRTSegment.Type.FIN)
+                .seqNum(0)
                 .rcvWin(SRTSegment.MAX_SEG_LEN)
                 .checksum(0)
                 .build();
 
-        for (int attempt = 1; attempt <= FIN_MAX_RETRY; attempt++) {
-            System.out.println("Sending FIN (attempt " + attempt + ")");
-            if (sendSegment(fin) == -1) {
-                System.err.println("Failed to send FIN segment.");
-                continue;
-            }
-
-            try {
-                Thread.sleep(FIN_TIMEOUT);
-            } catch (InterruptedException ignored) {}
-
-            if (tcb.clientState == SRTCState.CLOSED) {
-                System.out.println("FINACK received. Connection closed.");
-                return 1;
-            }
+        for (int i = 0; i < FIN_MAX_RETRY; i++) {
+            sendSegment(fin);
+            try { Thread.sleep(FIN_TIMEOUT); } catch (Exception ignored) {}
+            if (tcb.clientState == SRTCState.CLOSED) return 1;
         }
 
-        System.err.println("FIN retries exhausted. Connection may not have closed cleanly.");
         tcb.clientState = SRTCState.CLOSED;
         return -1;
     }
 
+
     public int closeSRTClient(int sockfd) {
-        //Check sockfd is valid
-        if (sockfd < 0 || sockfd >= MAX_TCB_ENTRIES) {
-            System.err.println("[SRTClient] Invalid socket ID: " + sockfd);
-            return -1;
-        }
-
-        // get TCBClient for this socket
+        if (sockfd < 0 || sockfd >= MAX_TCB_ENTRIES) return -1;
         TCBClient tcb = tcbTable[sockfd];
-        if (tcb == null) {
-            System.err.println("[SRTClient] No TCB found for socket ID " + sockfd);
-            return -1;
-        }
+        if (tcb == null || tcb.clientState != SRTCState.CLOSED) return -1;
 
-        if (tcb.clientState != SRTCState.CLOSED) {
-            System.err.println("[SRTClient] Socket " + sockfd + " not in CLOSED state. Cannot close yet.");
-            return -1;
-        }
-
-        if (tcb.timer != null) {
-            tcb.timer.cancel();
-        }
-
+        if (tcb.timer != null) tcb.timer.cancel();
+        tcb.sendBuffer.clear();
         tcbTable[sockfd] = null;
-
-        System.out.println("[SRTClient] Closed and released socket ID " + sockfd);
         return 1;
     }
 
 
-    private int sendSegment(SRTSegment segment){
-        try{
-            byte[] encodedSegment = segment.toBytes();
-            outputStream.writeInt(encodedSegment.length);
-            outputStream.write(encodedSegment);
+    // -------------------------------
+    // HELPER: send segment
+    // -------------------------------
+    int sendSegment(SRTSegment seg) {
+        try {
+            byte[] b = seg.toBytes();
+            outputStream.writeInt(b.length);
+            outputStream.write(b);
             outputStream.flush();
             return 1;
-        } catch (IOException e) {
-            System.err.println("Error sending SRTSegment: " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println("Send error: " + e.getMessage());
             return -1;
         }
     }
 
 
-    public int createSockSRTClient(int clientPort) {
+    // -------------------------------
+    // ALLOCATE TCB
+    // -------------------------------
+    public int createSockSRTClient(int port) {
         for (int i = 0; i < MAX_TCB_ENTRIES; i++) {
             if (tcbTable[i] == null) {
                 TCBClient tcb = new TCBClient();
-                tcb.nodeIDServer = 0;
-                tcb.portNumServer = 0;
-                tcb.nodeIDClient = 0;
-                tcb.portNumClient = clientPort;
+                tcb.portNumClient = port;
                 tcb.clientState = SRTCState.CLOSED;
                 tcb.timer = new Timer();
+
+                // Assignment 3 additions
+                tcb.sendBuffer = new LinkedList<>();
+                tcb.nextSeqNum = 0;
+                tcb.workerRunning = false;
+                tcb.sendBufUnsent = 0;
+
                 tcbTable[i] = tcb;
-                System.out.println("TCBClient created for client port " + clientPort);
-                return i; // return index of TCBClient in tcbTable
+                return i;
             }
         }
-        System.err.println("Could not create TCBClient for client port " + clientPort);
         return -1;
     }
 
 
-    // Pass "localhost" and port number as arguments
-    public int startOverlay(String host, int port){
-        try{
-            // Use host name to resolve Server IP address
-            InetAddress ip = InetAddress.getByName(host);
-
-            // Open TCP socket connection to server using resolved IP address
-            overlaySocket = new Socket(ip, port);
-
-            // Create input and output streams for the socket connection
+    // -------------------------------
+    // OVERLAY TCP SETUP
+    // -------------------------------
+    public int startOverlay(String host, int port) {
+        try {
+            overlaySocket = new Socket(InetAddress.getByName(host), port);
             outputStream = new DataOutputStream(overlaySocket.getOutputStream());
             inputStream = new DataInputStream(overlaySocket.getInputStream());
-
-            System.out.println("Connected to " + host + ":" + port);
             return 1;
-
-        } catch (IOException e) {
-            System.err.println("Could not connect to " + host + ":" + port);
+        } catch (Exception e) {
             return -1;
         }
     }
 
     public int stopOverlay() {
         try {
-            if (listenThread != null) {
-                listenThread.stopRunning();
-                try {
-                    listenThread.join(200);
-                } catch (InterruptedException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                }
-            }
             if (inputStream != null) inputStream.close();
             if (outputStream != null) outputStream.close();
             if (overlaySocket != null) overlaySocket.close();
-
-            System.out.println("SRTClient Connection is closed.");
             return 1;
-        } catch (IOException e) {
-            System.err.println("Could not close SRTClient connection: " + e.getMessage());
+        } catch (Exception e) {
             return -1;
         }
     }
 }
 
 
+
+// ===============================
+// LISTENER THREAD
+// ===============================
 class ListenThread extends Thread {
+
     private final DataInputStream inputStream;
     private final TCBClient[] tcbTable;
-    private volatile boolean running = true; // Thread safe flag for run loop
+    private volatile boolean running = true;
 
-    public ListenThread(DataInputStream inputStream, TCBClient[] tcbTable) {
-        this.inputStream = inputStream;
-        this.tcbTable = tcbTable;
+    public ListenThread(DataInputStream in, TCBClient[] table) {
+        this.inputStream = in;
+        this.tcbTable = table;
     }
 
     public void run() {
         while (running) {
             try {
-                int segmentLength = inputStream.readInt();
-                byte[] buffer = new byte[segmentLength];
-                inputStream.readFully(buffer);
+                int len = inputStream.readInt();
+                byte[] buf = new byte[len];
+                inputStream.readFully(buf);
 
-                // parse the buffer into a SRTSegment object
-                SRTSegment srtSegment = SRTSegment.fromBytes(buffer);
+                SRTSegment seg = SRTSegment.fromBytes(buf);
+                int idx = findTCB(seg.destPort, seg.srcPort);
+                if (idx == -1) continue;
 
-                //Identify which TCBClient this segment belongs to
-                int tcbIndex = findTCB(srtSegment.destPort, srtSegment.srcPort);
-                if (tcbIndex == -1) {
-                    System.err.println("Error reading from SRTClient(no TCBClient found): " + srtSegment.destPort + " " + srtSegment.srcPort);
-                    continue;
-                }
-                switch (srtSegment.type) {
+                TCBClient tcb = tcbTable[idx];
+
+                switch (seg.type) {
                     case SYNACK:
-                        tcbTable[tcbIndex].clientState = SRTCState.CONNECTED;
-                        System.out.println("[Listener] Received SYNACK → connection established for socket " + tcbIndex);
+                        tcb.clientState = SRTCState.CONNECTED;
                         break;
 
                     case FINACK:
-                        tcbTable[tcbIndex].clientState = SRTCState.CLOSED;
-                        System.out.println("[Listener] Received FINACK → connection closed for socket " + tcbIndex);
+                        tcb.clientState = SRTCState.CLOSED;
+                        break;
+
+                    case DATAACK:
+                        handleDataAck(tcb, seg.seqNum);
                         break;
 
                     default:
-                        System.out.println("[Listener] Ignored segment type " + srtSegment.type);
                         break;
                 }
 
-            } catch (IOException e) {
-                if (running){
-                System.err.println("Error reading from SRTClient(IO error): " + e.getMessage());
-                }
-                running = false;
             } catch (Exception e) {
-                if (running){
-                System.err.println("Error reading from SRTClient(parsing error): " + e.getMessage());
-                }
                 running = false;
             }
         }
-
-        System.out.println("ListenThread stopped.");
     }
 
+    private void handleDataAck(TCBClient tcb, int ackNum) {
+        synchronized (tcb.sendBuffer) {
+            tcb.sendBuffer.removeIf(
+                    node -> node.segment.seqNum + node.segment.length <= ackNum
+            );
+            tcb.sendBufUnsent = Math.max(0, tcb.sendBufUnsent - 1);
+        }
+    }
 
-    private int findTCB(int destPort, int srcPort){
+    private int findTCB(int destPort, int srcPort) {
         for (int i = 0; i < tcbTable.length; i++) {
-            TCBClient tcb = tcbTable[i];
-            if (tcb != null && tcb.portNumClient == destPort && tcb.portNumServer == srcPort) {
+            TCBClient t = tcbTable[i];
+            if (t != null && t.portNumClient == destPort && t.portNumServer == srcPort)
                 return i;
-            }
         }
         return -1;
     }
@@ -321,21 +310,100 @@ class ListenThread extends Thread {
     public void stopRunning() {
         running = false;
     }
-
-
-
 }
 
 
 
+// ===============================
+// SEND BUFFER NODE
+// ===============================
+class SendBufferNode {
+    SRTSegment segment;
+    long sentTime;
 
+    SendBufferNode(SRTSegment seg) {
+        this.segment = seg;
+        this.sentTime = 0;
+    }
+}
+
+
+
+// ===============================
+// SEND THREAD (GBN)
+// ===============================
+class SendThread implements Runnable {
+
+    private final TCBClient tcb;
+
+    public SendThread(TCBClient t) { this.tcb = t; }
+
+    @Override
+    public void run() {
+        while (tcb.clientState == SRTCState.CONNECTED && !tcb.sendBuffer.isEmpty()) {
+
+            synchronized (tcb.sendBuffer) {
+                while (tcb.sendBufUnsent < Math.min(tcb.sendBuffer.size(), 10)) {
+
+                    SendBufferNode node = tcb.sendBuffer.get(tcb.sendBufUnsent);
+                    node.sentTime = System.currentTimeMillis();
+
+                    // Send the DATA segment
+                    // (we need a reference to SRTClient's sendSegment, so store it externally)
+                    SRTClientHolder.client.sendSegment(node.segment);
+
+                    tcb.sendBufUnsent++;
+                }
+            }
+
+            try { Thread.sleep(50); } catch (Exception ignored) {}
+
+            synchronized (tcb.sendBuffer) {
+                if (!tcb.sendBuffer.isEmpty()) {
+                    SendBufferNode head = tcb.sendBuffer.getFirst();
+                    long now = System.currentTimeMillis();
+                    if (now - head.sentTime > 200) {
+                        // timeout → resend all
+                        for (int i = 0; i < tcb.sendBufUnsent; i++) {
+                            SendBufferNode node = tcb.sendBuffer.get(i);
+                            node.sentTime = System.currentTimeMillis();
+                            SRTClientHolder.client.sendSegment(node.segment);
+                        }
+                    }
+                }
+            }
+        }
+
+        tcb.workerRunning = false;
+    }
+}
+
+
+
+// ===============================
+// GLOBAL CLIENT HANDLE
+// (needed so SendThread can call sendSegment)
+// ===============================
+class SRTClientHolder {
+    public static SRTClient client;
+}
+
+
+
+// ===============================
+// EXTENDED TCB
+// ===============================
 class TCBClient {
     int nodeIDServer;
     int portNumServer;
     int nodeIDClient;
     int portNumClient;
-    volatile SRTCState clientState;
+    SRTCState clientState;
     Timer timer;
 
+    // Assignment 3 fields:
+    LinkedList<SendBufferNode> sendBuffer;
+    int nextSeqNum;
+    int sendBufUnsent;
+    boolean workerRunning;
 }
-
