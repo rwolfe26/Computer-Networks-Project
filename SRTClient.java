@@ -35,25 +35,21 @@ public class SRTClient {
 
     private static final int MAX_TCB_ENTRIES = 10;
     private TCBClient[] tcbTable;
-
+    private ListenThread listener;
 
     // -------------------------------
     // INITIALIZATION
     // -------------------------------
     public int initSRTClient() {
-        try {
-            tcbTable = new TCBClient[MAX_TCB_ENTRIES];
-            for (int i = 0; i < MAX_TCB_ENTRIES; i++) tcbTable[i] = null;
-
-            ListenThread listener = new ListenThread(inputStream, tcbTable);
-            listener.start();
-
-            System.out.println("SRTClient initialized.");
-            return 1;
-        } catch (Exception e) {
-            System.err.println("Could not initialize SRTClient: " + e.getMessage());
+        if (inputStream == null) {
+            System.err.println("initSRTClient: call startOverlay first");
             return -1;
         }
+        tcbTable = new TCBClient[MAX_TCB_ENTRIES];
+        listener = new ListenThread(inputStream, tcbTable);
+        listener.start();
+        System.out.println("SRTClient initialized.");
+        return 1;
     }
 
 
@@ -121,7 +117,7 @@ public class SRTClient {
         // First time adding data? Start worker
         if (!tcb.workerRunning) {
             tcb.workerRunning = true;
-            new Thread(new SendThread(tcb)).start();
+            new Thread(new SendThread(tcb, GBN_WINDOW, DATA_TIMEOUT, SEND_POLL)).start();
         }
 
         return 1;
@@ -219,6 +215,7 @@ public class SRTClient {
             overlaySocket = new Socket(InetAddress.getByName(host), port);
             outputStream = new DataOutputStream(overlaySocket.getOutputStream());
             inputStream = new DataInputStream(overlaySocket.getInputStream());
+            SRTClientHolder.client = this;
             return 1;
         } catch (Exception e) {
             return -1;
@@ -227,6 +224,7 @@ public class SRTClient {
 
     public int stopOverlay() {
         try {
+            if (listener != null) {listener.stopRunning(); listener.join(200); }
             if (inputStream != null) inputStream.close();
             if (outputStream != null) outputStream.close();
             if (overlaySocket != null) overlaySocket.close();
@@ -290,11 +288,18 @@ class ListenThread extends Thread {
     }
 
     private void handleDataAck(TCBClient tcb, int ackNum) {
+        int removed = 0;
         synchronized (tcb.sendBuffer) {
-            tcb.sendBuffer.removeIf(
-                    node -> node.segment.seqNum + node.segment.length <= ackNum
-            );
-            tcb.sendBufUnsent = Math.max(0, tcb.sendBufUnsent - 1);
+            while (!tcb.sendBuffer.isEmpty()) {
+                SendBufferNode head = tcb.sendBuffer.peekFirst();
+                int start = head.segment.seqNum;
+                int end = start + head.segment.length;
+                if (end <= ackNum) {
+                    tcb.sendBuffer.removeFirst();
+                    removed++;
+                } else break;
+            }
+            tcb.sendBufUnsent = Math.max(0, tcb.sendBufUnsent - removed);
         }
     }
 
@@ -335,45 +340,47 @@ class SendBufferNode {
 class SendThread implements Runnable {
 
     private final TCBClient tcb;
-
-    public SendThread(TCBClient t) { this.tcb = t; }
+    private final int win, timeoutMs, pollMs;
+    public SendThread(TCBClient t, int win, int timeoutMs, int pollMs) { this.tcb = t; this.win = win; this.timeoutMs = timeoutMs; this.pollMs = pollMs;}
 
     @Override
     public void run() {
         while (tcb.clientState == SRTCState.CONNECTED && !tcb.sendBuffer.isEmpty()) {
 
             synchronized (tcb.sendBuffer) {
-                while (tcb.sendBufUnsent < Math.min(tcb.sendBuffer.size(), 10)) {
+                while (tcb.sendBufUnsent < Math.min(tcb.sendBuffer.size(), win)) {
 
                     SendBufferNode node = tcb.sendBuffer.get(tcb.sendBufUnsent);
-                    node.sentTime = System.currentTimeMillis();
-
-                    // Send the DATA segment
+                    if (node.sentTime == 0){
+                        // Send the DATA segment
                     // (we need a reference to SRTClient's sendSegment, so store it externally)
-                    SRTClientHolder.client.sendSegment(node.segment);
-
-                    tcb.sendBufUnsent++;
+                        SRTClientHolder.client.sendSegment(node.segment);
+                        node.sentTime = System.currentTimeMillis();
+                        tcb.sendBufUnsent++;
+                    } else break;
                 }
             }
 
             try { Thread.sleep(50); } catch (Exception ignored) {}
 
             synchronized (tcb.sendBuffer) {
-                if (!tcb.sendBuffer.isEmpty()) {
-                    SendBufferNode head = tcb.sendBuffer.getFirst();
-                    long now = System.currentTimeMillis();
-                    if (now - head.sentTime > 200) {
+                if (!tcb.sendBuffer.isEmpty() && tcb.sendBufUnsent > 0) {
+                    SendBufferNode oldest = tcb.sendBuffer.getFirst();
+                    long age = System.currentTimeMillis() - oldest.sentTime;
+                    if (age >= timeoutMs) {
                         // timeout → resend all
                         for (int i = 0; i < tcb.sendBufUnsent; i++) {
                             SendBufferNode node = tcb.sendBuffer.get(i);
-                            node.sentTime = System.currentTimeMillis();
                             SRTClientHolder.client.sendSegment(node.segment);
+                            node.sentTime = System.currentTimeMillis();
                         }
                     }
+                } else if (tcb.sendBuffer.isEmpty()) {
+                    break;
                 }
             }
+            try { Thread.sleep(pollMs); } catch (Exception ignored) {} 
         }
-
         tcb.workerRunning = false;
     }
 }
@@ -398,7 +405,7 @@ class TCBClient {
     int portNumServer;
     int nodeIDClient;
     int portNumClient;
-    SRTCState clientState;
+    volatile SRTCState clientState;
     Timer timer;
 
     // Assignment 3 fields:

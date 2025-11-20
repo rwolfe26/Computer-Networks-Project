@@ -10,7 +10,7 @@ public class SRTServer {
     // states of the server
     public static final int S_CLOSED=1, S_LISTENING=2, S_CONNECTED=3, S_CLOSEWAIT=4;
     public static final int CLOSE_WAIT_TIMEOUT_MS = 1000;
-
+    private static final int RECVBUF_SIZE = 1024 * 1024;
 
     //overlays 
     private ServerSocket overlayListen;
@@ -25,6 +25,9 @@ public class SRTServer {
     public static class TCB {
         int portServer, portClient;
         volatile int state = S_CLOSED;
+        int expectSeqNum;
+        byte[] recvBuf;
+        int usedLen;
     }
 
     private final TCB[] table = new TCB[32];
@@ -64,6 +67,10 @@ public class SRTServer {
             TCB t = new TCB();
             t.portServer = serverPort;
             t.state = S_CLOSED;
+
+            t.expectSeqNum = 0;
+            t.recvBuf = new byte[RECVBUF_SIZE];
+            t.usedLen = 0;
             table[i] = t;
             return i;
         }
@@ -168,14 +175,30 @@ public class SRTServer {
                         case DATA:
                             System.out.printf("[SRTServer] DATA received (%d bytes) from %d%n",
                                               seg.length, seg.srcPort);
-                            // Optional show DATAACK:
+                            // accept if the DATA starts at expectSeqNum
+                            if (seg.seqNum == t.expectSeqNum){
+                                if (t.usedLen + seg.length <= RECVBUF_SIZE) {
+                                    System.arraycopy(seg.data, 0, t.recvBuf, t.usedLen, seg.length);
+                                    t.usedLen += seg.length;
+                                    t.expectSeqNum += seg.length;
+                                    System.out.printf("[SRTServer] Accepted DATA; expectSeqNum no %d, usedLen=%d%n",
+                                     t.expectSeqNum, t.usedLen);
+                                } else {
+                                    System.out.println("[SRTServer] Receive buffer full, dropping DATA payload");
+                                }
+                            } else {
+                                System.out.printf("[SRTServer] Out of order DATA (got seq=%d, expect=%d) -> drop%n",
+                                 seg.seqNum, t.expectSeqNum);
+                            }
                             SRTSegment dataAck = new SRTSegment.Builder()
                                 .type(SRTSegment.Type.DATAACK)
                                 .srcPort(t.portServer)
                                 .destPort(t.portClient)
+                                .seqNum(t.expectSeqNum)
                                 .build();
                             send(dataAck);
-                            System.out.printf("[SRTServer] Sent DATAACK to client %d%n", t.portClient);
+                            System.out.printf("[SRTServer] Sent DATAACK (ack=%d) to client %d%n",
+                            t.expectSeqNum, t.portClient);
                             break;
     
                         default:

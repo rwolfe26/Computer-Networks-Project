@@ -98,7 +98,9 @@ public class Client {
             return;
         }
         System.out.println("[client] connected (87->88)");
-
+        byte[] msg = "Hello from SRT DATA".getBytes();
+        srtc.sendSRTClient(sock1, msg);
+        System.out.println("[client] sent DATA message");
         try { Thread.sleep(10_000); } catch (InterruptedException ignored) {}
 
         System.out.println("[client] disconnect 87->88");
