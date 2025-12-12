@@ -1,0 +1,28 @@
+# network.dat
+# Format:
+#   nodeID port
+#   nodeID1 nodeID2 cost   (undirected link with integer cost)
+#
+# This topology uses 6 nodes total:
+#   Client: 77
+#   Server: 382
+#   Routers: 521, 96, 14, 200
+
+77  50077
+382 50382
+521 50521
+96  50096
+14  50014
+200 50200
+
+# links (undirected)
+77  521 4
+521 96  7
+521 14  2
+14  96  3
+96  382 2
+
+# extra router to create alternate paths / demonstrate Dijkstra decisions
+521 200 5
+200 96  1
+200 14  6
