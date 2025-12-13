@@ -211,7 +211,7 @@ public class Graph {
         Integer cur = endId;
         path.addFirst(cur);
 
-        while (cur != null && cur != startId) {
+        while (cur != null && !cur.equals(startId)) {
             cur = res.prev.get(cur);
             if (cur == null) return Collections.emptyList();
             path.addFirst(cur);
@@ -230,7 +230,7 @@ public class Graph {
         Integer hop = destId;
         Integer p = prev.get(hop);
 
-        while (p != null && p != startId) {
+        while (p != null && !p.equals(startId)) {
             hop = p;
             p = prev.get(hop);
         }

@@ -34,7 +34,7 @@ public class Server {
 private static void runSrtDemo(int overlayPort) throws Exception {
     System.out.println("[SRT] is starting server demo on overlay port " + overlayPort);
 
-    SRTServer srt = new SRTServer();
+    SRTServer srt = new SRTServer(382, 77);
     if (srt.startOverlay(overlayPort) < 0) throw new RuntimeException("overlay failed");
     if (srt.init() < 0) throw new RuntimeException("init failed");
 

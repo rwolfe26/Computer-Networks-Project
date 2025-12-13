@@ -12,6 +12,18 @@ public class SRTServer {
     public static final int CLOSE_WAIT_TIMEOUT_MS = 1000;
     private static final int RECVBUF_SIZE = 1024 * 1024;
 
+    private int myNodeId;
+    private int remoteNodeId;
+
+    public SRTServer(int myNodeId, int remoteNodeId) {
+        this.myNodeId = myNodeId;
+        this.remoteNodeId = remoteNodeId;
+    }
+
+    public SRTServer(){
+        this(382, 77); // server node = 382, client = 77 from the network.dat
+    }
+
     //overlays 
     private ServerSocket overlayListen;
     private Socket overlaySock;
@@ -116,12 +128,24 @@ public class SRTServer {
     
                     byte[] buf = new byte[frameLen];
                     in.readFully(buf);
-                    SRTSegment seg = SRTSegment.fromBytes(buf);
+
+                    Packet pkt = Packet.fromBytes(buf);
+                    SRTSegment seg = pkt.seg;
+
     
                     System.out.printf(
-                        "[SRTServer] Received %s (src=%d → dest=%d, len=%d)%n",
-                        seg.type, seg.srcPort, seg.destPort, seg.length
+                        "[SRTServer] Received %s packet (net: %d, seg: srcPort=%d → destPort=%d, len=%d)%n",
+                        (seg == null ? "null" : seg.type),
+                        pkt.srcNodeID,
+                        pkt.destNodeID,
+                        (seg == null ? -1 : seg.srcPort),
+                        (seg == null ? -1 : seg.destPort),
+                        (seg == null ? 0 : seg.length)
                     );
+
+                    if (seg == null) {
+                        continue;
+                    }
     
                     // Route by server’s SRT port
                     TCB t = findbyServerPort(seg.destPort);
@@ -219,7 +243,8 @@ public class SRTServer {
 
     private void send(SRTSegment seg) {
         try {
-            byte[] bytes = seg.toBytes();
+            Packet pkt = new Packet(myNodeId, remoteNodeId, seg);
+            byte[] bytes = pkt.toBytes();
             out.writeInt(bytes.length);   // for the length prefix
             out.write(bytes);
             out.flush();
