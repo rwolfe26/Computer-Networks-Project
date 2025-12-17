@@ -1,7 +1,7 @@
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.LinkedList;
 import java.util.Timer;
@@ -14,13 +14,22 @@ enum SRTCState {
 }
 
 // -------------------------------
-//        SRT CLIENT
+//        SRT CLIENT (PROJECT 4)
 // -------------------------------
 public class SRTClient {
 
-    private Socket overlaySocket;
+    private Socket routerSocket;  // Changed from overlaySocket - connects to ROUTER
     private DataInputStream inputStream;
     private DataOutputStream outputStream;
+
+    // PROJECT 4: Node IDs for network layer
+    private int myNodeID = 77;      // Client node ID from network.dat
+    private int serverNodeID = 382; // Server node ID from network.dat
+
+    // PROJECT 4: Graph and routing
+    private Graph graph;
+    private int nextHopNodeID;      // Next hop router to reach server
+    private int nextHopPort;        // Port of next hop router
 
     private static final int SYN_TIMEOUT = 100;
     private static final int SYN_MAX_RETRY = 5;
@@ -166,11 +175,15 @@ public class SRTClient {
 
 
     // -------------------------------
-    // HELPER: send segment
+    // HELPER: send segment via network layer
     // -------------------------------
     int sendSegment(SRTSegment seg) {
         try {
-            byte[] b = seg.toBytes();
+            // PROJECT 4: Wrap segment in Packet for network layer
+            // Packet will be routed through the network to reach serverNodeID
+            Packet packet = new Packet(myNodeID, serverNodeID, seg);
+            byte[] b = packet.toBytes();
+
             outputStream.writeInt(b.length);
             outputStream.write(b);
             outputStream.flush();
@@ -208,17 +221,143 @@ public class SRTClient {
 
 
     // -------------------------------
-    // OVERLAY TCP SETUP
+    // PROJECT 4: ROUTING SETUP
     // -------------------------------
-    public int startOverlay(String host, int port) {
+    /**
+     * Establishes connection to the next-hop ROUTER (not directly to server).
+     * Loads network topology, determines next hop, and connects.
+     *
+     * PROJECT 4 FIX: Client must LISTEN on its network port (like server does)
+     * so routers can send responses back to it!
+     */
+    public int startOverlay(String host, int overlayPort) {
         try {
-            overlaySocket = new Socket(InetAddress.getByName(host), port);
-            outputStream = new DataOutputStream(overlaySocket.getOutputStream());
-            inputStream = new DataInputStream(overlaySocket.getInputStream());
+            // PROJECT 4: Load network topology
+            graph = new Graph();
+            graph.readNetworkDat("network.dat");
+            graph.buildAllNextHopTables();
+
+            // Determine next hop router to reach server
+            NetworkNode myNode = graph.getNode(myNodeID);
+            if (myNode == null) {
+                System.err.println("[SRTClient] Node " + myNodeID + " not found in network.dat");
+                return -1;
+            }
+
+            nextHopNodeID = myNode.nextHopFor(serverNodeID);
+            if (nextHopNodeID == -1) {
+                System.err.println("[SRTClient] No route from " + myNodeID + " to " + serverNodeID);
+                return -1;
+            }
+
+            nextHopPort = graph.getPort(nextHopNodeID);
+
+            // PROJECT 4 FIX: Get client's network port and listen on it
+            int myPort = graph.getPort(myNodeID);
+
+            System.out.printf("[SRTClient] Client node %d will listen on port %d for router connections%n",
+                    myNodeID, myPort);
+            System.out.printf("[SRTClient] Next-hop router to reach server %d is node %d on port %d%n",
+                    serverNodeID, nextHopNodeID, nextHopPort);
+
+            // Start listening for incoming connections from routers (for responses)
+            ServerSocket listenSocket = new ServerSocket(myPort);
+            System.out.printf("[SRTClient] Listening on port %d for incoming routed packets...%n", myPort);
+
+            // Start a thread to accept router connections
+            Thread acceptThread = new Thread(() -> {
+                try {
+                    while (true) {
+                        Socket incomingSocket = listenSocket.accept();
+                        System.out.printf("[SRTClient] Accepted connection from router%n");
+
+                        // Handle this connection for incoming packets
+                        DataInputStream inStream = new DataInputStream(incomingSocket.getInputStream());
+                        Thread incomingHandler = new Thread(() -> {
+                            try {
+                                while (true) {
+                                    int len = inStream.readInt();
+                                    byte[] buf = new byte[len];
+                                    inStream.readFully(buf);
+
+                                    // Parse incoming packet
+                                    Packet packet = Packet.fromBytes(buf);
+                                    SRTSegment seg = packet.seg;
+
+                                    System.out.printf("[SRTClient] Received %s from network (src=%d->dest=%d)%n",
+                                            seg.type, packet.srcNodeID, packet.destNodeID);
+
+                                    // Find appropriate TCB and process
+                                    for (int i = 0; i < tcbTable.length; i++) {
+                                        TCBClient tcb = tcbTable[i];
+                                        if (tcb != null && tcb.portNumClient == seg.destPort &&
+                                                tcb.portNumServer == seg.srcPort) {
+
+                                            switch (seg.type) {
+                                                case SYNACK:
+                                                    System.out.println("[SRTClient] SYNACK received! Connection established.");
+                                                    tcb.clientState = SRTCState.CONNECTED;
+                                                    break;
+                                                case FINACK:
+                                                    tcb.clientState = SRTCState.CLOSED;
+                                                    break;
+                                                case DATAACK:
+                                                    handleDataAckDirect(tcb, seg.seqNum);
+                                                    break;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // Connection closed
+                            }
+                        });
+                        incomingHandler.setDaemon(true);
+                        incomingHandler.start();
+                    }
+                } catch (Exception e) {
+                    System.err.println("[SRTClient] Accept thread error: " + e.getMessage());
+                }
+            });
+            acceptThread.setDaemon(true);
+            acceptThread.start();
+
+            // Small delay to ensure we're listening before connecting out
+            Thread.sleep(500);
+
+            // PROJECT 4: Connect to ROUTER, not to server
+            routerSocket = new Socket("localhost", nextHopPort);
+            outputStream = new DataOutputStream(routerSocket.getOutputStream());
+            inputStream = new DataInputStream(routerSocket.getInputStream());
+
             SRTClientHolder.client = this;
+
+            System.out.printf("[SRTClient] Connected to router %d, will send packets destined for server %d%n",
+                    nextHopNodeID, serverNodeID);
+
             return 1;
         } catch (Exception e) {
+            System.err.println("[SRTClient] startOverlay error: " + e.getMessage());
+            e.printStackTrace();
             return -1;
+        }
+    }
+
+    // Helper method for handling DATAACK from incoming connections
+    private void handleDataAckDirect(TCBClient tcb, int ackNum) {
+        int removed = 0;
+        synchronized (tcb.sendBuffer) {
+            while (!tcb.sendBuffer.isEmpty()) {
+                SendBufferNode head = tcb.sendBuffer.peekFirst();
+                int start = head.segment.seqNum;
+                int end = start + head.segment.length;
+                if (end <= ackNum) {
+                    tcb.sendBuffer.removeFirst();
+                    removed++;
+                } else break;
+            }
+            tcb.sendBufUnsent = Math.max(0, tcb.sendBufUnsent - removed);
         }
     }
 
@@ -227,7 +366,7 @@ public class SRTClient {
             if (listener != null) {listener.stopRunning(); listener.join(200); }
             if (inputStream != null) inputStream.close();
             if (outputStream != null) outputStream.close();
-            if (overlaySocket != null) overlaySocket.close();
+            if (routerSocket != null) routerSocket.close();
             return 1;
         } catch (Exception e) {
             return -1;
@@ -258,7 +397,10 @@ class ListenThread extends Thread {
                 byte[] buf = new byte[len];
                 inputStream.readFully(buf);
 
-                SRTSegment seg = SRTSegment.fromBytes(buf);
+                // PROJECT 4: Incoming data is wrapped in Packet
+                Packet packet = Packet.fromBytes(buf);
+                SRTSegment seg = packet.seg;
+
                 int idx = findTCB(seg.destPort, seg.srcPort);
                 if (idx == -1) continue;
 
@@ -341,7 +483,12 @@ class SendThread implements Runnable {
 
     private final TCBClient tcb;
     private final int win, timeoutMs, pollMs;
-    public SendThread(TCBClient t, int win, int timeoutMs, int pollMs) { this.tcb = t; this.win = win; this.timeoutMs = timeoutMs; this.pollMs = pollMs;}
+    public SendThread(TCBClient t, int win, int timeoutMs, int pollMs) {
+        this.tcb = t;
+        this.win = win;
+        this.timeoutMs = timeoutMs;
+        this.pollMs = pollMs;
+    }
 
     @Override
     public void run() {
@@ -352,8 +499,7 @@ class SendThread implements Runnable {
 
                     SendBufferNode node = tcb.sendBuffer.get(tcb.sendBufUnsent);
                     if (node.sentTime == 0){
-                        // Send the DATA segment
-                    // (we need a reference to SRTClient's sendSegment, so store it externally)
+                        // Send the DATA segment via network layer
                         SRTClientHolder.client.sendSegment(node.segment);
                         node.sentTime = System.currentTimeMillis();
                         tcb.sendBufUnsent++;
@@ -379,7 +525,7 @@ class SendThread implements Runnable {
                     break;
                 }
             }
-            try { Thread.sleep(pollMs); } catch (Exception ignored) {} 
+            try { Thread.sleep(pollMs); } catch (Exception ignored) {}
         }
         tcb.workerRunning = false;
     }
@@ -389,7 +535,6 @@ class SendThread implements Runnable {
 
 // ===============================
 // GLOBAL CLIENT HANDLE
-// (needed so SendThread can call sendSegment)
 // ===============================
 class SRTClientHolder {
     public static SRTClient client;

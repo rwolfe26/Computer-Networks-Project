@@ -12,16 +12,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Client.java
  *
- * Works with two server modes:
- *   1) --simple  : string-only round trip using Data{Input,Output}Stream (Section 2.7 demo)
- *   2) (default) : multi-client chat using Object streams and Message objects
+ * Works with three modes:
+ *   1) --simple  : string-only round trip using Data{Input,Output}Stream
+ *   2) --srt     : PROJECT 4 SRT demo with network layer routing
+ *   3) (default) : multi-client chat using Object streams and Message objects
  *
  * Flags:
  *   --host <nameOrIp>   (default: localhost)
  *   --port <num>        (default: 59090)
  *   --simple            (run the simple one-shot string client)
+ *   --srt               (run PROJECT 4 SRT demo with routing through routers)
  *   --name <display>    (chat mode only; sends "/hello <display>" on connect)
- *   --msg  "<text>"     (simple mode only; message to send once; otherwise you’ll be prompted)
+ *   --msg  "<text>"     (simple mode only; message to send once)
  */
 public class Client {
 
@@ -70,20 +72,36 @@ public class Client {
     }
 
 
+    /**
+     * PROJECT 4: SRT Demo with Network Layer Routing
+     *
+     * Key differences from previous projects:
+     * - Client NO LONGER connects directly to server
+     * - Client connects to its NEXT-HOP ROUTER (node 521 in network.dat)
+     * - Packets are routed through the network: Client(77) -> Router(521) -> Router(96) -> Server(382)
+     * - startOverlay now loads network.dat and determines routing
+     */
     private static void runSrtDemo(String host, int port) {
-        System.out.println("[client] SRT demo ovrlaay " + host + ":" + port);
+        System.out.println("[client] PROJECT 4 SRT demo with network layer routing");
+        System.out.println("[client] Client will connect to ROUTER, not directly to server");
 
         SRTClient srtc = new SRTClient();
+
+        // PROJECT 4: startOverlay now connects to next-hop router based on network.dat
+        // The 'port' parameter is ignored - client uses network.dat topology
         if (srtc.startOverlay(host, port) < 0) {
-            System.err.println("[client] overlay failed");
+            System.err.println("[client] Failed to connect to next-hop router");
             return;
         }
+
         if (srtc.initSRTClient() < 0) {
             System.err.println("[client] init failed");
             srtc.stopOverlay();
+            return;
         }
 
-        //first connection from 87 client to 88 server
+        // Connection from client SRT port 87 to server SRT port 88
+        // Packets will be routed through network layer
         int sock1 = srtc.createSockSRTClient(87);
         if (sock1 < 0) {
             System.err.println("createSock failed");
@@ -91,26 +109,29 @@ public class Client {
             return;
         }
 
-        System.out.println("[client] connect 87 -> 88");
+        System.out.println("[client] Establishing SRT connection: port 87 -> port 88");
+        System.out.println("[client] (Packets routed: Client node 77 -> Router 521 -> Router 96 -> Server node 382)");
+
         if (srtc.connectSRTClient(sock1, 88) < 0){
             System.err.println("connect failed");
             srtc.stopOverlay();
             return;
         }
-        System.out.println("[client] connected (87->88)");
-        byte[] msg = "Hello from SRT DATA".getBytes();
+
+        System.out.println("[client] SRT connection established (87->88)");
+
+        byte[] msg = "Hello from SRT with network layer routing!".getBytes();
         srtc.sendSRTClient(sock1, msg);
-        System.out.println("[client] sent DATA message");
+        System.out.println("[client] Sent DATA message through network layer");
+
         try { Thread.sleep(10_000); } catch (InterruptedException ignored) {}
 
-        System.out.println("[client] disconnect 87->88");
+        System.out.println("[client] Initiating disconnect (87->88)");
         if (srtc.disconnectSRTClient(sock1) < 0) System.err.println("disconnect returned -1");
         if (srtc.closeSRTClient(sock1) < 0) System.err.println("close returned -1");
 
         srtc.stopOverlay();
-        System.out.println("[client] SRT demo done.");
-
-
+        System.out.println("[client] SRT demo complete.");
     }
 
     /* -------------------------------------------------------------
@@ -236,7 +257,7 @@ public class Client {
                             }
                         }
 
-                        // Send the message object. 'from' is best-effort; server may overwrite/augment.
+                        // Send the message object
                         Message m = new Message(line, displayName, to);
                         oos.writeObject(m);
                         oos.flush();
@@ -256,7 +277,7 @@ public class Client {
             reader.start();
             writer.start();
 
-            // Block main thread until writer finishes (user typed /quit or console closed)
+            // Block main thread until writer finishes
             try {
                 writer.join();
             } catch (InterruptedException ignored) { }
